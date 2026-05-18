@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Window
+    x:Class="SpotifyTaskbarPlayer.SettingsWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <Grid Background="{ThemeResource ApplicationPageBackgroundThemeBrush}" Padding="20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <StackPanel Grid.Row="0" Margin="0,0,0,16">
+            <TextBlock Text="Spotify Taskbar Player — Settings"
+                       FontSize="18" FontWeight="SemiBold" />
+            <TextBlock Text="Изменения применяются сразу"
+                       FontSize="11" Opacity="0.6" />
+        </StackPanel>
+
+        <ScrollViewer Grid.Row="1" VerticalScrollMode="Auto">
+            <StackPanel Spacing="14">
+
+                <ToggleSwitch x:Name="SpotifyOnlyToggle"
+                              Header="Только Spotify"
+                              OffContent="Off — показываются любые источники (YouTube, Edge, VLC и т.д.)"
+                              OnContent="On — фильтруется только Spotify"
+                              Toggled="OnAnyChanged" />
+
+                <ToggleSwitch x:Name="TintToggle"
+                              Header="Цвет акцента из обложки"
+                              OffContent="Off — стандартный системный accent"
+                              OnContent="On — прогресс окрашивается под обложку альбома"
+                              Toggled="OnAnyChanged" />
+
+                <StackPanel>
+                    <TextBlock Text="Отступ от левого края таскбара (px)" Margin="0,0,0,4" />
+                    <NumberBox x:Name="LeftPaddingBox"
+                               Minimum="0" Maximum="100" SmallChange="1" LargeChange="5"
+                               SpinButtonPlacementMode="Inline"
+                               ValueChanged="OnNumberChanged" />
+                </StackPanel>
+
+                <StackPanel>
+                    <TextBlock Text="Ширина плеера (px)" Margin="0,0,0,4" />
+                    <NumberBox x:Name="PlayerWidthBox"
+                               Minimum="150" Maximum="600" SmallChange="10" LargeChange="50"
+                               SpinButtonPlacementMode="Inline"
+                               ValueChanged="OnNumberChanged" />
+                </StackPanel>
+
+                <StackPanel>
+                    <TextBlock x:Name="OpacityLabel" Margin="0,0,0,4" />
+                    <Slider x:Name="OpacitySlider"
+                            Minimum="0.3" Maximum="1.0" StepFrequency="0.05"
+                            TickFrequency="0.1" TickPlacement="BottomRight"
+                            ValueChanged="OnSliderChanged" />
+                </StackPanel>
+
+                <StackPanel>
+                    <Grid Margin="0,0,0,4">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Grid.Column="0" Text="Цвет фона плеера" />
+                        <Button x:Name="EyedropperButton" Grid.Column="1"
+                                Content="🎯 Взять с экрана"
+                                Click="OnEyedropper" />
+                    </Grid>
+                    <ColorPicker x:Name="BgColorPicker"
+                                 IsColorSpectrumVisible="True"
+                                 IsColorPreviewVisible="True"
+                                 IsHexInputVisible="True"
+                                 IsAlphaEnabled="False"
+                                 IsColorChannelTextInputVisible="True"
+                                 ColorSpectrumShape="Box"
+                                 ColorChanged="OnBgColorChanged" />
+                </StackPanel>
+
+            </StackPanel>
+        </ScrollViewer>
+
+        <Grid Grid.Row="2" Margin="0,16,0,0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <Button x:Name="ResetButton" Grid.Column="0" Content="Сбросить к default"
+                    HorizontalAlignment="Left" Click="OnReset" />
+            <Button x:Name="CloseButton" Grid.Column="1" Content="Close"
+                    Style="{ThemeResource AccentButtonStyle}" Click="OnClose" />
+        </Grid>
+
+    </Grid>
+
+</Window>

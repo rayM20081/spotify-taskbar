@@ -1,0 +1,30 @@
+## .NET / VS / Rider artifacts
+bin/
+obj/
+.vs/
+.idea/
+*.user
+*.suo
+*.userprefs
+
+## NuGet
+packages/
+*.nupkg
+
+## Generated
+**/Generated Files/
+**/AppPackages/
+**/BundleArtifacts/
+*.appx
+*.appxbundle
+*.msix
+*.msixbundle
+
+## Publish
+publish/
+*.pubxml.user
+
+## Misc
+*.log
+Thumbs.db
+.DS_Store
