@@ -4,7 +4,7 @@
 
 ## Скриншот
 
-*(добавь свой скриншот сюда)*
+![Spotify Taskbar Player в действии](Assets/screenshot.png)
 
 ## Что внутри
 
