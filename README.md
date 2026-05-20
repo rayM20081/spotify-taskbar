@@ -6,8 +6,6 @@ Works with Spotify and anything else that talks to the system media transport (S
 
 ![Screenshot](Assets/screenshot.png)
 
-> The screenshot above is from the original C# build (see [Legacy](#legacy)). The current shipping version is a Windhawk mod under [`windhawk-mod/`](windhawk-mod/).
-
 ## How it works
 
 The widget is a [Windhawk](https://windhawk.net) mod. Windhawk hosts the mod in its own process, which gives it the privileges needed to:
@@ -73,10 +71,6 @@ The `.wh.cpp` is a single ~1.6 kLOC file using Win32 + WinRT + GDI+ + Direct2D +
 - **Requires Windhawk.** The same widget shipped as a standalone `.exe` would fight Shell_TrayWnd for z-order on every focus change. Windhawk's process privileges are what make the immersive z-band available.
 - **Single-monitor.** The widget anchors to the primary taskbar (`Shell_TrayWnd`).
 - **Start menu covers it.** Like every taskbar widget on Win11, our band is below Start's. Once Start closes the widget reappears immediately.
-
-## Legacy
-
-The repo originally shipped a standalone WinUI 3 / .NET 10 app under [`SpotifyTaskbarPlayer/`](SpotifyTaskbarPlayer/). It works (`WS_CHILD` of `Shell_TrayWnd` for free z-order, pixel-sampling auto-color, eyedropper, tray menu) but couldn't achieve real acrylic transparency without injection. The Windhawk mod supersedes it visually and architecturally; the C# project remains as historical reference and a way to study the SMTC/embedding patterns without learning Windhawk.
 
 ## License
 
