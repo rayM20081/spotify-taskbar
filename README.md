@@ -1,94 +1,83 @@
 # Spotify Taskbar Player
 
-Компактный медиа-плеер Windows 11, встроенный прямо в таскбар — туда где раньше был виджет погоды Microsoft. Показывает обложку, название трека и кнопки управления; работает с Spotify и любым другим источником, который пишет в системный SMTC (YouTube Music, Foobar, Tidal, локальные mp3 через Groove и т.д.).
+A native-feel media widget pinned to the Windows 11 taskbar. Album art, track title, controls, and a colored progress line that takes its tint from the cover — all rendered through DirectWrite + Direct2D for the same crispness as built-in Windows UI.
 
-## Скриншот
+Works with Spotify and anything else that talks to the system media transport (SMTC): YouTube Music, Foobar, Tidal, Edge / Chrome video, Groove and local files.
 
-![Spotify Taskbar Player в действии](Assets/screenshot.png)
+![Screenshot](Assets/screenshot.png)
 
-## Что внутри
+> The screenshot above is from the original C# build (see [Legacy](#legacy)). The current shipping version is a Windhawk mod under [`windhawk-mod/`](windhawk-mod/).
 
-- **SMTC-интеграция** — данные о треке и команды play/pause/next/prev через `GlobalSystemMediaTransportControlsSessionManager`. Не нужен Spotify Web API, не нужен OAuth.
-- **Embedded в Shell_TrayWnd** — окно живёт как child системного таскбара, не моргает при кликах, остаётся видимым когда открыт Start menu.
-- **Цвет акцента из обложки** — прогресс-полоска автоматически окрашивается в доминантный цвет альбома.
-- **Пипетка цвета фона** — подбирает любой цвет с экрана, чтобы плеер визуально слился с твоим таскбаром.
-- **Tray-иконка** — стандартное контекстное меню (открыть Spotify / автостарт / настройки / выход).
-- **Без зависимости от античитов** — не использует `WDA_EXCLUDEFROMCAPTURE`, глобальных хуков или чтения памяти других процессов.
+## How it works
 
-## Требования
+The widget is a [Windhawk](https://windhawk.net) mod. Windhawk hosts the mod in its own process, which gives it the privileges needed to:
 
-- Windows 11 (22621 / 22H2 или новее)
-- [Windows App Runtime 1.8](https://learn.microsoft.com/en-us/windows/apps/windows-app-sdk/downloads)
-- [.NET 10 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/10.0) (для framework-dependent сборки)
+- Create the window in **`ZBID_IMMERSIVE_NOTIFICATION`** via `CreateWindowInBand`, the same z-band Action Center / volume flyouts use. No z-order race with `Shell_TrayWnd`, no flicker when Start opens.
+- Render text and icons through **Direct2D + DirectWrite** at native quality.
+- Read media state through **WinRT GSMTC** — `GlobalSystemMediaTransportControlsSessionManager`.
+- Track the taskbar with **`SetWinEventHook(EVENT_OBJECT_LOCATIONCHANGE)`** so the widget moves with the taskbar (auto-hide, multi-monitor, resolution change).
 
-## Установка
+## Install
 
-1. Выключи стандартный виджет погоды Microsoft:
-   `Settings → Personalization → Taskbar → Taskbar items → Widgets = Off`
-2. Запусти `SpotifyTaskbarPlayer.exe`.
-3. Через tray-меню можно включить **Start with Windows** — плеер сам будет стартовать при входе.
+1. Install [Windhawk](https://windhawk.net/) (one-time, ~10 MB, no telemetry, OSS — `ramensoftware/windhawk`).
+2. In Windhawk, click **Create new mod**, paste the contents of [`windhawk-mod/spotify-taskbar-player.wh.cpp`](windhawk-mod/spotify-taskbar-player.wh.cpp).
+3. Click **Compile** then **Save & Apply**. The widget appears on the taskbar.
+4. Recommended: disable the built-in Widgets icon to free taskbar real estate:
+   `Settings → Personalization → Taskbar → Widgets = Off`.
 
-## Настройки
+## Settings
 
-Tray-иконка → правый клик → **Settings…**:
+Open the mod's **Settings** tab in Windhawk:
 
-- **Только Spotify** — фильтр SMTC; off = показываются все источники.
-- **Цвет акцента из обложки** — окрашивать прогресс под альбом.
-- **Отступ слева** / **Ширина плеера** — позиция и размер.
-- **Прозрачность** — opacity всего плеера.
-- **Цвет фона + 🎯 пипетка** — подобрать цвет под свой таскбар.
+| Setting | Default | Notes |
+| --- | --- | --- |
+| Left padding | 0 | Distance from the taskbar's left edge (px) |
+| Player width | 250 | Widget width (px) |
+| Background tint alpha | 0 | 0 = fully transparent, 255 = opaque dark fill |
+| Artist text opacity (%) | 70 | Brightness of the artist line |
+| Progress bar thickness | 2 | Height in px (1–8) |
+| Progress bar track alpha | 0 | Opacity of the unplayed track (0 = only colored part shows) |
+| Progress bar track length | full | `full` (classic) or `played` (track stops where accent ends) |
+| Progress bar bottom gap | 3 | Vertical distance from the widget bottom (px) |
+| Spotify only | true | Filter SMTC to Spotify only |
+| Hide on fullscreen | true | Auto-hide for games / fullscreen video |
+| Icon style | mdl2 | `mdl2` / `fluent` / `vector` — pick your control-button look |
 
-Настройки сохраняются в `%AppData%\SpotifyTaskbarPlayer\settings.json`.
+Settings live in `HKLM\SOFTWARE\Windhawk\Engine\Mods\local@spotify-taskbar-player\Settings`. Editing the source schema sets new defaults; existing values persist across recompiles.
 
-## Архитектура
+## Development workflow
 
-Стек: **.NET 10 + WinUI 3 (WindowsAppSDK 1.8) unpackaged**.
-
-```
-SpotifyTaskbarPlayer/
-├── App.xaml(.cs)                  # Application entry, settings load
-├── MainWindow.xaml(.cs)           # Player UI, taskbar embedding
-├── SettingsWindow.xaml(.cs)       # ColorPicker + eyedropper settings
-├── Services/
-│   ├── SmtcService.cs             # WinRT SMTC wrapper with timeline interpolation
-│   ├── TaskbarTracker.cs          # SetWinEventHook on Shell_TrayWnd
-│   ├── AlbumColorExtractor.cs     # Mean RGB + HSV saturation boost
-│   ├── AutostartService.cs        # HKCU\...\Run toggle
-│   ├── PlayerSettings.cs          # POCO
-│   └── SettingsService.cs         # JSON persistence + Changed event
-├── Views/
-│   └── TrayIconHost.cs            # Native Win32 tray icon + popup menu
-└── Interop/
-    ├── User32.cs                  # P/Invoke surface
-    ├── DwmApi.cs                  # DwmSetWindowAttribute
-    ├── AccentApi.cs               # SetWindowCompositionAttribute (experimental)
-    └── TrayInterop.cs             # Shell_NotifyIcon + TrackPopupMenu
-```
-
-## Ограничения
-
-- **Прозрачный/blurred фон невозможен** — WinUI 3 рисует через DXGI swap chain, который не поддерживает прозрачность в child-window режиме. Используется пипетка для подбора solid-цвета под акрил таскбара.
-- **Не виден поверх Start menu / Search / Widgets** — это by-design защита Win11 ZBID (Start живёт в `ZBID_IMMERSIVE_MOGO` выше `ZBID_DESKTOP`). Когда юзер закрывает Start — плеер возвращается.
-- **Только primary monitor** — на secondary дисплеях с таскбаром (`Shell_SecondaryTrayWnd`) плеер не появится.
-
-## Сборка из исходников
+The source is at [`windhawk-mod/spotify-taskbar-player.wh.cpp`](windhawk-mod/spotify-taskbar-player.wh.cpp). For local iteration, Windhawk reads from `C:\ProgramData\Windhawk\ModsSource\local@spotify-taskbar-player.wh.cpp`. The repo ships a one-line sync:
 
 ```powershell
-dotnet build SpotifyTaskbarPlayer\SpotifyTaskbarPlayer.csproj -c Release -p:Platform=x64
+& "windhawk-mod\sync.ps1"
 ```
 
-Release-сборка для раздачи:
+After syncing, hit **Compile + Apply** in Windhawk. (First-time setup: take ownership of the destination file once via `icacls` so user-mode writes work — see `sync.ps1` header.)
 
-```powershell
-dotnet publish SpotifyTaskbarPlayer\SpotifyTaskbarPlayer.csproj `
-    -c Release -r win-x64 `
-    --self-contained false
-```
+The `.wh.cpp` is a single ~1.6 kLOC file using Win32 + WinRT + GDI+ + Direct2D + DirectWrite. No external dependencies beyond what Windhawk's bundled MinGW compiler provides.
 
-Готовая папка с exe и dll-ками — `bin\x64\Release\net10.0-windows10.0.22621.0\win-x64\publish\`. Копируется или архивируется целиком, у получателя должны быть установлены .NET 10 Desktop Runtime + WindowsAppRuntime 1.8.
+## Features
 
-> SingleFile-публикация для unpackaged WinUI 3 на .NET 10 нестабильна — падает с `0xC000027B` потому что `MICROSOFT_WINDOWSAPPRUNTIME_BASE_DIRECTORY` env var нужно установить до entry point, а с auto-generated `Main` это сделать нельзя без переписи bootstrap. Поэтому используется multi-file.
+- Album cover (32×32 rounded), track title (SemiBold), artist line
+- Prev / Play-Pause / Next controls with fade-in/out hover state
+- Click cover or title to open Spotify (`spotify:` URI)
+- Progress bar with two layout modes (full track / matched length) and album-derived accent color
+- Time-anchored position interpolation (`Position` + `LastUpdatedTime` — no per-second snap-back)
+- Auto-hide on fullscreen apps via `SHQueryUserNotificationState`
+- Live z-order through `ZBID_IMMERSIVE_NOTIFICATION` — no Shell_TrayWnd race
+- Spotify-only source filter (toggle to allow any SMTC app)
 
-## Лицензия
+## Limitations
+
+- **Requires Windhawk.** The same widget shipped as a standalone `.exe` would fight Shell_TrayWnd for z-order on every focus change. Windhawk's process privileges are what make the immersive z-band available.
+- **Single-monitor.** The widget anchors to the primary taskbar (`Shell_TrayWnd`).
+- **Start menu covers it.** Like every taskbar widget on Win11, our band is below Start's. Once Start closes the widget reappears immediately.
+
+## Legacy
+
+The repo originally shipped a standalone WinUI 3 / .NET 10 app under [`SpotifyTaskbarPlayer/`](SpotifyTaskbarPlayer/). It works (`WS_CHILD` of `Shell_TrayWnd` for free z-order, pixel-sampling auto-color, eyedropper, tray menu) but couldn't achieve real acrylic transparency without injection. The Windhawk mod supersedes it visually and architecturally; the C# project remains as historical reference and a way to study the SMTC/embedding patterns without learning Windhawk.
+
+## License
 
 MIT.
