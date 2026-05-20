@@ -21,6 +21,7 @@ public sealed partial class MainWindow : Window
 
     private readonly SmtcService _smtc;
     private readonly TaskbarTracker _taskbar;
+    private readonly AutoBackgroundSampler _bgSampler;
     private AppWindow? _appWindow;
     private IntPtr _hwnd;
     private bool _firstActivation = true;
@@ -42,11 +43,18 @@ public sealed partial class MainWindow : Window
         _taskbar = new TaskbarTracker(DispatcherQueue);
         _taskbar.TaskbarMoved += OnTaskbarMoved;
 
+        _bgSampler = new AutoBackgroundSampler(
+            DispatcherQueue,
+            () => _hwnd,
+            () => _taskbar.CurrentRect,
+            c => RootGrid.Background = new SolidColorBrush(c));
+
         Activated += OnFirstActivated;
         SettingsService.Changed += OnSettingsChanged;
         Closed += (_, _) =>
         {
             SettingsService.Changed -= OnSettingsChanged;
+            _bgSampler.Dispose();
             _smtc.Dispose();
             _taskbar.Dispose();
         };
@@ -61,6 +69,7 @@ public sealed partial class MainWindow : Window
         _smtc.SpotifyOnly = SettingsService.Current.SpotifyOnly;
         ApplyOpacity();
         ApplyBackgroundColor();
+        _bgSampler.SetEnabled(SettingsService.Current.AutoBackground);
         if (_taskbar.IsAttached)
             OnTaskbarMoved(this, _taskbar.CurrentRect);
         ApplyAccentFromCache();
@@ -73,6 +82,7 @@ public sealed partial class MainWindow : Window
 
     private void ApplyBackgroundColor()
     {
+        if (SettingsService.Current.AutoBackground) return; // sampler owns it
         var argb = SettingsService.Current.BackgroundColor;
         var c = Windows.UI.Color.FromArgb(
             (byte)((argb >> 24) & 0xFF),
@@ -92,6 +102,7 @@ public sealed partial class MainWindow : Window
             return;
         }
         EmbedIntoTaskbar();
+        _bgSampler.SetEnabled(SettingsService.Current.AutoBackground);
     }
 
     private void EmbedIntoTaskbar()

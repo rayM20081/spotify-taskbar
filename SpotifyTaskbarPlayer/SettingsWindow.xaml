@@ -57,6 +57,12 @@
                             ValueChanged="OnSliderChanged" />
                 </StackPanel>
 
+                <ToggleSwitch x:Name="AutoBgToggle"
+                              Header="Авто-цвет фона под таскбар"
+                              OffContent="Off — используется ручной цвет из палитры ниже"
+                              OnContent="On — каждые 0.5с берётся пиксель таскбара рядом с виджетом"
+                              Toggled="OnAnyChanged" />
+
                 <StackPanel>
                     <Grid Margin="0,0,0,4">
                         <Grid.ColumnDefinitions>

@@ -39,6 +39,7 @@ public sealed partial class SettingsWindow : Window
         LeftPaddingBox.Value = s.LeftPadding;
         PlayerWidthBox.Value = s.PlayerWidth;
         OpacitySlider.Value = s.Opacity;
+        AutoBgToggle.IsOn = s.AutoBackground;
         BgColorPicker.Color = UnpackArgb(s.BackgroundColor);
         UpdateOpacityLabel();
         _suppressApply = false;
@@ -64,6 +65,7 @@ public sealed partial class SettingsWindow : Window
             PlayerWidth = SanitizeInt(PlayerWidthBox.Value, 280),
             Opacity = OpacitySlider.Value,
             BackgroundColor = PackArgb(BgColorPicker.Color),
+            AutoBackground = AutoBgToggle.IsOn,
         });
     }
 
