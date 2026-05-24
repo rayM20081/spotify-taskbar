@@ -207,6 +207,10 @@ static GlobalSystemMediaTransportControlsSessionManager g_SessionManager = nullp
 static atomic<bool> g_Running{false};
 static HWND g_hMediaWindow = nullptr;
 static HWINEVENTHOOK g_TaskbarHook = nullptr;
+// PID of the explorer.exe that owns the Shell_TrayWnd we registered the hook
+// against. Lets us detect explorer restarts (and the boot-time case where the
+// taskbar didn't exist yet when the mod loaded) and re-register the hook.
+static DWORD g_TaskbarPid = 0;
 static int g_HoverButton = 0; // 0=none, 1=prev, 2=playpause, 3=next, 4=album/title
 // Per-button hover animation state. Each value is the current alpha of the
 // circular hover background (0=no hover, 1=fully shown). On each paint we
@@ -853,18 +857,30 @@ static void CALLBACK TaskbarEventProc(HWINEVENTHOOK, DWORD, HWND hwnd,
     PostMessage(g_hMediaWindow, WM_APP + 10, 0, 0);
 }
 
+// Idempotent: safe to call on every poll tick.
+//   - No taskbar yet (Windhawk loaded before explorer at boot): return silently
+//     so the poll-timer can retry until Shell_TrayWnd shows up.
+//   - Already hooked the current explorer: nothing to do.
+//   - Explorer restarted (pid changed): tear down the dead hook and re-attach.
 static void RegisterTaskbarHook(HWND hwnd) {
     HWND hTaskbar = FindWindow(L"Shell_TrayWnd", nullptr);
-    if (hTaskbar) {
-        DWORD pid = 0;
-        DWORD tid = GetWindowThreadProcessId(hTaskbar, &pid);
-        if (tid != 0) {
-            g_TaskbarHook = SetWinEventHook(
-                EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_LOCATIONCHANGE,
-                nullptr, TaskbarEventProc, pid, tid,
-                WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
-        }
+    if (!hTaskbar) return;
+
+    DWORD pid = 0;
+    DWORD tid = GetWindowThreadProcessId(hTaskbar, &pid);
+    if (tid == 0 || pid == 0) return;
+
+    if (g_TaskbarHook && pid == g_TaskbarPid) return;
+
+    if (g_TaskbarHook) {
+        UnhookWinEvent(g_TaskbarHook);
+        g_TaskbarHook = nullptr;
     }
+    g_TaskbarHook = SetWinEventHook(
+        EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_LOCATIONCHANGE,
+        nullptr, TaskbarEventProc, pid, tid,
+        WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+    g_TaskbarPid = pid;
     PostMessage(hwnd, WM_APP + 10, 0, 0);
 }
 
@@ -994,6 +1010,10 @@ static LRESULT CALLBACK MediaWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
 
         case WM_TIMER:
             if (wParam == IDT_POLL_MEDIA) {
+                // Recover from boot races and explorer restarts: idempotent,
+                // attaches the hook the first time Shell_TrayWnd appears.
+                RegisterTaskbarHook(hwnd);
+
                 UpdateMediaInfo();
 
                 // Auto-hide on fullscreen apps / presentation mode.
@@ -1008,8 +1028,11 @@ static LRESULT CALLBACK MediaWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                 if (shouldHide && IsWindowVisible(hwnd)) {
                     ShowWindow(hwnd, SW_HIDE);
                 } else if (!shouldHide && !IsWindowVisible(hwnd)) {
-                    HWND tb = FindWindow(L"Shell_TrayWnd", nullptr);
-                    if (tb && IsWindowVisible(tb)) ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+                    // Route through WM_APP+10 so the widget is positioned at
+                    // the taskbar BEFORE being shown — direct ShowWindow here
+                    // would flash the widget at its stale (0,0) create-time
+                    // coordinates for one frame.
+                    SendMessage(hwnd, WM_APP + 10, 0, 0);
                 }
                 Repaint(hwnd);
             } else if (wParam == IDT_PROGRESS) {
@@ -1068,6 +1091,7 @@ static LRESULT CALLBACK MediaWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
 
         case WM_DESTROY:
             if (g_TaskbarHook) { UnhookWinEvent(g_TaskbarHook); g_TaskbarHook = nullptr; }
+            g_TaskbarPid = 0;
             {
                 lock_guard<mutex> guard(g_MediaState.lock);
                 if (g_MediaState.albumArt) { delete g_MediaState.albumArt; g_MediaState.albumArt = nullptr; }
@@ -1100,11 +1124,18 @@ static void MediaThread() {
     if (hUser32)
         CreateWindowInBand = (pCreateWindowInBand)GetProcAddress(hUser32, "CreateWindowInBand");
 
+    // Create hidden: WM_APP+10 (posted from RegisterTaskbarHook once the
+    // taskbar is found) is responsible for sizing the widget to the taskbar
+    // band AND showing it (SetWindowPos with SWP_SHOWWINDOW). Creating with
+    // WS_VISIBLE would briefly flash a 250x48 strip at (0,0) on every load,
+    // and at boot — when Windhawk launches before explorer creates
+    // Shell_TrayWnd — the widget would stay stranded at (0,0) until the user
+    // toggles the mod.
     if (CreateWindowInBand) {
         g_hMediaWindow = CreateWindowInBand(
             WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
             wc.lpszClassName, L"SpotifyTaskbarPlayer",
-            WS_POPUP | WS_VISIBLE,
+            WS_POPUP,
             0, 0, g_Settings.playerWidth, 48,
             NULL, NULL, wc.hInstance, NULL,
             ZBID_IMMERSIVE_NOTIFICATION);
@@ -1115,7 +1146,7 @@ static void MediaThread() {
         g_hMediaWindow = CreateWindowEx(
             WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
             wc.lpszClassName, L"SpotifyTaskbarPlayer",
-            WS_POPUP | WS_VISIBLE,
+            WS_POPUP,
             0, 0, g_Settings.playerWidth, 48,
             NULL, NULL, wc.hInstance, NULL);
     }
