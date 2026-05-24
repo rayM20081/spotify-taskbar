@@ -2,7 +2,7 @@
 // @id              spotify-taskbar-player
 // @name            Spotify Taskbar Player
 // @description     Spotify/SMTC media player widget pinned to the Windows 11 taskbar with native acrylic.
-// @version         0.1.0
+// @version         0.1.1
 // @author          rayM
 // @include         explorer.exe
 // @compilerOptions -lole32 -ldwmapi -lgdi32 -luser32 -lwindowsapp -lshcore -lgdiplus -lshell32 -ld2d1 -ldwrite
@@ -1027,11 +1027,14 @@ static LRESULT CALLBACK MediaWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                 }
                 if (shouldHide && IsWindowVisible(hwnd)) {
                     ShowWindow(hwnd, SW_HIDE);
-                } else if (!shouldHide && !IsWindowVisible(hwnd)) {
-                    // Route through WM_APP+10 so the widget is positioned at
-                    // the taskbar BEFORE being shown — direct ShowWindow here
-                    // would flash the widget at its stale (0,0) create-time
-                    // coordinates for one frame.
+                } else if (!shouldHide) {
+                    // Reconcile position + visibility against the taskbar on
+                    // EVERY tick, not just when hidden. If the hook attached
+                    // while the taskbar still had a degenerate (0,0,0,0) rect
+                    // at boot, the widget would otherwise stay stuck at (0,0):
+                    // it's already visible, and the one settle event may have
+                    // fired before the hook existed. WM_APP+10 self-guards with
+                    // a position diff-check, so this is a no-op once aligned.
                     SendMessage(hwnd, WM_APP + 10, 0, 0);
                 }
                 Repaint(hwnd);
@@ -1051,6 +1054,16 @@ static LRESULT CALLBACK MediaWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                 if (IsWindowVisible(hwnd)) ShowWindow(hwnd, SW_HIDE);
                 return 0;
             }
+
+            RECT rc; GetWindowRect(tb, &rc);
+            int tbHeight = rc.bottom - rc.top;
+            int tbWidth  = rc.right  - rc.left;
+            // Taskbar exists but isn't laid out yet (degenerate rect during the
+            // boot sequence). Anchoring now would pin the widget to (0,0) and,
+            // since we'd also show it, leave it stranded there. Bail and let the
+            // next poll tick re-anchor once the taskbar has real coordinates.
+            if (tbWidth <= 0 || tbHeight <= 0) return 0;
+
             if (!IsWindowVisible(hwnd)) {
                 // Only restore if not currently suppressed by fullscreen.
                 bool gameMode = false;
@@ -1063,8 +1076,6 @@ static LRESULT CALLBACK MediaWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                 if (!gameMode) ShowWindow(hwnd, SW_SHOWNOACTIVATE);
             }
 
-            RECT rc; GetWindowRect(tb, &rc);
-            int tbHeight = rc.bottom - rc.top;
             int x = rc.left + g_Settings.leftPadding;
             int y = rc.top;
             int w = g_Settings.playerWidth;
