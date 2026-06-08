@@ -76,6 +76,7 @@ Requirements:
 #include <dwmapi.h>
 #include <gdiplus.h>
 #include <shcore.h>
+#include <shellscalingapi.h>
 #include <d2d1.h>
 #include <dwrite.h>
 #include <string>
@@ -182,6 +183,45 @@ void LoadSettings() {
     if (g_Settings.tintAlpha > 255)      g_Settings.tintAlpha = 255;
 }
 
+// ------ DPI scaling ------
+// Settings (LeftPadding, PlayerWidth, ProgressBarHeight, …) are pixel-based
+// at 100% DPI for user familiarity. We scale internally so the widget renders
+// at the right physical size on every monitor. g_CurrentDpi is refreshed
+// whenever we touch a different monitor (WM_CREATE, WM_APP+10 after the
+// taskbar moves us, WM_DPICHANGED). RecreateTextFormats() rebuilds the
+// DWrite formats with font sizes scaled to match, so glyphs render at the
+// same logical em-size regardless of DPI.
+static UINT g_CurrentDpi = 96;
+
+static inline int   DpiScale (int   v) { return MulDiv(v, (int)g_CurrentDpi, 96); }
+static inline float DpiScaleF(float v) { return v * (float)g_CurrentDpi / 96.0f; }
+
+static UINT DpiForTaskbar(HWND hwnd) {
+    // Prefer the taskbar's monitor — we sit on it, not on whatever monitor
+    // the widget got created at. Fall back to the widget's own monitor (or
+    // the desktop) if the taskbar isn't around yet (boot races).
+    HWND tb = FindWindow(L"Shell_TrayWnd", nullptr);
+    HWND ref = tb ? tb : (hwnd ? hwnd : GetDesktopWindow());
+    HMONITOR mon = MonitorFromWindow(ref, MONITOR_DEFAULTTONEAREST);
+    UINT dpiX = 96, dpiY = 96;
+    if (mon && SUCCEEDED(GetDpiForMonitor(mon, MDT_EFFECTIVE_DPI, &dpiX, &dpiY)))
+        return dpiX ? dpiX : 96;
+    return 96;
+}
+
+// SetProcessDpiAwarenessContext is Win10 1703+; load dynamically so we don't
+// hard-fail on older SDKs / hosts. DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
+// is the documented sentinel value (-4) per MSDN.
+static void EnablePerMonitorDpiV2() {
+    typedef BOOL (WINAPI* pSetCtx)(HANDLE);
+    HMODULE hUser = GetModuleHandle(L"user32.dll");
+    if (!hUser) return;
+    auto fn = (pSetCtx)GetProcAddress(hUser, "SetProcessDpiAwarenessContext");
+    // Go through LONG_PTR so the sign-extended sentinel survives the cast
+    // on 64-bit (raw `(HANDLE)-4` triggers int-to-pointer warnings on GCC).
+    if (fn) fn((HANDLE)(LONG_PTR)-4);
+}
+
 // ------ Media state ------
 struct MediaState {
     wstring  title  = L"(no track)";
@@ -231,24 +271,35 @@ static IDWriteTextFormat*    g_pFluentSmall = nullptr; // Fluent: 11 DIP prev/ne
 static IDWriteTextFormat*    g_pFluentBig   = nullptr; // Fluent: 12 DIP play/pause
 static IDWriteRenderingParams* g_pRenderParams = nullptr;
 
-static void InitD2DDWrite() {
-    if (g_pD2DFactory) return;
-    D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED,
-        __uuidof(ID2D1Factory), nullptr, (void**)&g_pD2DFactory);
-    DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED,
-        __uuidof(IDWriteFactory), (IUnknown**)&g_pDWriteFactory);
+// Recreate DWrite TextFormat objects sized for the given DPI. Called from
+// InitD2DDWrite() with the default 96 DPI, then re-invoked from WM_CREATE /
+// WM_DPICHANGED / WM_APP+10 whenever the widget's monitor DPI changes.
+// Font size is multiplied by dpi/96 so glyphs render at the same logical
+// em-size on every monitor — we keep the D2D render target at 96 DPI so
+// all coordinates remain in physical pixels (consistent with the GDI+ side
+// of Paint, which has no DPI mode of its own).
+static void RecreateTextFormats(UINT dpi) {
+    if (!g_pDWriteFactory) return;
+    float scale = (float)dpi / 96.0f;
 
-    // XAML FontSize values are in DIPs (effective pixels), NOT points.
-    // FontSize="11" => 11 DIPs em-size. Pass raw values to DWrite — no
-    // 96/72 conversion (was making text 33% too large).
+    auto releaseFmt = [](IDWriteTextFormat*& p) { if (p) { p->Release(); p = nullptr; } };
+    releaseFmt(g_pTitleFmt);
+    releaseFmt(g_pArtistFmt);
+    releaseFmt(g_pMdl2Small);
+    releaseFmt(g_pMdl2Big);
+    releaseFmt(g_pFluentSmall);
+    releaseFmt(g_pFluentBig);
+
+    // XAML FontSize values are in DIPs (effective pixels), NOT points —
+    // pass raw values (no 96/72 conversion), then *scale for current DPI.
 
     // Title: 11 DIPs BOLD "Segoe UI". XAML uses SemiBold + ClearType-on-opaque,
-    // which optically reads heavier than the same weight on grayscale-AA.
-    // We bump one weight step (SemiBold->Bold) to compensate.
+    // which optically reads heavier than the same weight on grayscale-AA, so
+    // we bump one weight step (SemiBold->Bold) to compensate.
     g_pDWriteFactory->CreateTextFormat(
         L"Segoe UI", nullptr,
         DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_STYLE_NORMAL,
-        DWRITE_FONT_STRETCH_NORMAL, 11.0f, L"en-us", &g_pTitleFmt);
+        DWRITE_FONT_STRETCH_NORMAL, 11.0f * scale, L"en-us", &g_pTitleFmt);
     if (g_pTitleFmt) {
         g_pTitleFmt->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
         // NEAR (top) — combined with precise rect Y we get tight stacking
@@ -262,15 +313,13 @@ static void InitD2DDWrite() {
         if (trim) trim->Release();
     }
 
-    // Artist: 10 DIPs MEDIUM (500) "Segoe UI". XAML uses Regular + Opacity=0.7,
-    // but pixel analysis of the C# screenshot shows the artist text renders
-    // at full white (255,255,255) — Opacity doesn't reduce text alpha there.
-    // Grayscale AA on a layered surface renders 1 weight thinner than
-    // ClearType-on-opaque, so we bump weight one step to MEDIUM to match.
+    // Artist: 10 DIPs MEDIUM (500) "Segoe UI". Grayscale AA on a layered
+    // surface renders 1 weight thinner than ClearType-on-opaque, so we bump
+    // weight one step to MEDIUM to match the C# screenshot.
     g_pDWriteFactory->CreateTextFormat(
         L"Segoe UI", nullptr,
         DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_FONT_STYLE_NORMAL,
-        DWRITE_FONT_STRETCH_NORMAL, 10.0f, L"en-us", &g_pArtistFmt);
+        DWRITE_FONT_STRETCH_NORMAL, 10.0f * scale, L"en-us", &g_pArtistFmt);
     if (g_pArtistFmt) {
         g_pArtistFmt->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
         g_pArtistFmt->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
@@ -283,13 +332,13 @@ static void InitD2DDWrite() {
     }
 
     // Two icon fonts — user picks the style at runtime.
-    // MDL2 Assets: classic Win10-era media controls (Previous/Pause/Next w/ bars).
+    // MDL2 Assets: classic Win10-era media controls.
     // Fluent Icons: minimal chevron arrows.
     auto mkIcon = [&](const wchar_t* family, float size, IDWriteTextFormat** out) {
         g_pDWriteFactory->CreateTextFormat(
             family, nullptr,
             DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
-            DWRITE_FONT_STRETCH_NORMAL, size, L"en-us", out);
+            DWRITE_FONT_STRETCH_NORMAL, size * scale, L"en-us", out);
         if (*out) {
             (*out)->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
             (*out)->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
@@ -299,6 +348,18 @@ static void InitD2DDWrite() {
     mkIcon(L"Segoe MDL2 Assets",   12.0f, &g_pMdl2Big);
     mkIcon(L"Segoe Fluent Icons",  11.0f, &g_pFluentSmall);
     mkIcon(L"Segoe Fluent Icons",  12.0f, &g_pFluentBig);
+}
+
+static void InitD2DDWrite() {
+    if (g_pD2DFactory) return;
+    D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED,
+        __uuidof(ID2D1Factory), nullptr, (void**)&g_pD2DFactory);
+    DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED,
+        __uuidof(IDWriteFactory), (IUnknown**)&g_pDWriteFactory);
+
+    // Text formats are sized per-DPI — RecreateTextFormats is also called
+    // from WM_CREATE / WM_DPICHANGED whenever the monitor changes.
+    RecreateTextFormats(g_CurrentDpi);
 
     // Custom rendering params — NATURAL_SYMMETRIC mode gives the sharpest
     // grayscale antialiasing DWrite supports for layered surfaces (default
@@ -599,19 +660,19 @@ static void Paint(HDC hdc, int width, int height) {
 
     // Progress bar layout: thin bar inset from both sides (aligned with the
     // album art) with a user-configurable gap above the bottom edge.
-    const int pbH        = g_Settings.progressHeight;
-    const int pbBottomGap = g_Settings.progressBottomGap;
+    const int pbH        = DpiScale(g_Settings.progressHeight);
+    const int pbBottomGap = DpiScale(g_Settings.progressBottomGap);
     // Content (album, text, buttons) is centered in the FULL taskbar height
     // — independent of the progress bar position, so the progress bar can
     // grow/shrink without shoving the rest off-center.
     const int contentH = height;
-    const int artSize  = 32;
-    const int artX     = 6;                          // 4 root padding + 2 left margin
+    const int artSize  = DpiScale(32);
+    const int artX     = DpiScale(6);                // 4 root padding + 2 left margin
     const int artY     = (contentH - artSize) / 2;   // vertically centered
 
     // Album art with rounded corners (4 px radius).
     GraphicsPath artPath;
-    AddRoundedRect(artPath, (REAL)artX, (REAL)artY, (REAL)artSize, (REAL)artSize, 4);
+    AddRoundedRect(artPath, (REAL)artX, (REAL)artY, (REAL)artSize, (REAL)artSize, DpiScaleF(4.0f));
     if (artClone) {
         g.SetClip(&artPath);
         // UniformToFill: scale so the smaller side fills, crop the rest.
@@ -630,9 +691,9 @@ static void Paint(HDC hdc, int width, int height) {
     }
 
     // Right-side controls: prev, play/pause, next — 28x28 each, no gap.
-    const int btnSize = 28;
+    const int btnSize = DpiScale(28);
     const int btnY    = (contentH - btnSize) / 2;
-    int rightX = width - 4 - btnSize;
+    int rightX = width - DpiScale(4) - btnSize;
     g_RectNext      = { rightX, btnY, rightX + btnSize, btnY + btnSize }; rightX -= btnSize;
     g_RectPlayPause = { rightX, btnY, rightX + btnSize, btnY + btnSize }; rightX -= btnSize;
     g_RectPrev      = { rightX, btnY, rightX + btnSize, btnY + btnSize };
@@ -641,8 +702,8 @@ static void Paint(HDC hdc, int width, int height) {
     g_RectAlbumTitle = { 0, 0, g_RectPrev.left, contentH };
 
     // Title + artist text area — start right after the album art.
-    int textX     = artX + artSize + 6;
-    int textRight = g_RectPrev.left - 4;
+    int textX     = artX + artSize + DpiScale(6);
+    int textRight = g_RectPrev.left - DpiScale(4);
     int textWidth = textRight - textX;
     if (textWidth < 0) textWidth = 0;
 
@@ -666,12 +727,12 @@ static void Paint(HDC hdc, int width, int height) {
         BYTE a = (BYTE)(peakAlpha * anim);
         SolidBrush bg(Color(a, 255, 255, 255));
         // Inset 1px so the rounded fill doesn't touch adjacent buttons.
-        REAL x = (REAL)(r.left + 1);
-        REAL y = (REAL)(r.top  + 1);
-        REAL w = (REAL)(r.right  - r.left - 2);
-        REAL h = (REAL)(r.bottom - r.top  - 2);
+        REAL x = (REAL)(r.left + DpiScale(1));
+        REAL y = (REAL)(r.top  + DpiScale(1));
+        REAL w = (REAL)(r.right  - r.left - DpiScale(2));
+        REAL h = (REAL)(r.bottom - r.top  - DpiScale(2));
         GraphicsPath path;
-        AddRoundedRect(path, x, y, w, h, 4.0f);
+        AddRoundedRect(path, x, y, w, h, DpiScaleF(4.0f));
         g.FillPath(&bg, &path);
     };
     drawHover(g_RectPrev,      g_HoverAnim[0]);
@@ -681,8 +742,8 @@ static void Paint(HDC hdc, int width, int height) {
     // === Text and icons via Direct2D + DirectWrite ===
     // Tight vertical stack matching the C# StackPanel: title line right
     // above artist line, the pair centered in the content band.
-    const int titleLineH  = 14;  // ~ 11 DIP SemiBold + leading
-    const int artistLineH = 13;  // ~ 10 DIP Regular + leading
+    const int titleLineH  = DpiScale(14);  // ~ 11 DIP SemiBold + leading
+    const int artistLineH = DpiScale(13);  // ~ 10 DIP Regular + leading
     const int stackH      = titleLineH + artistLineH;
     int textBlockY = (contentH - stackH) / 2;
     int titleY     = textBlockY;
@@ -760,33 +821,33 @@ static void Paint(HDC hdc, int width, int height) {
         auto drawVec = [&](RECT r, int icon) {
             REAL cx = (REAL)(r.left + (r.right - r.left) / 2);
             REAL cy = (REAL)(r.top  + (r.bottom - r.top) / 2);
-            const REAL sz = 10.0f;
+            const REAL sz = DpiScaleF(10.0f);
             const REAL hs = sz / 2.0f;
-            const REAL bw = 1.6f;
+            const REAL bw = DpiScaleF(1.6f);
             if (icon == 1) { // prev
                 g.FillRectangle(&ib, cx - hs, cy - hs, bw, sz);
                 PointF p[3] = {
                     PointF(cx + hs, cy - hs),
                     PointF(cx + hs, cy + hs),
-                    PointF(cx - hs + bw + 1, cy)
+                    PointF(cx - hs + bw + DpiScaleF(1.0f), cy)
                 };
                 g.FillPolygon(&ib, p, 3);
             } else if (icon == 2) { // play
                 PointF p[3] = {
-                    PointF(cx - hs + 1, cy - hs),
-                    PointF(cx - hs + 1, cy + hs),
+                    PointF(cx - hs + DpiScaleF(1.0f), cy - hs),
+                    PointF(cx - hs + DpiScaleF(1.0f), cy + hs),
                     PointF(cx + hs,     cy)
                 };
                 g.FillPolygon(&ib, p, 3);
             } else if (icon == 3) { // pause
-                REAL pbw = 2.4f;
-                g.FillRectangle(&ib, cx - pbw - 1, cy - hs, pbw, sz);
-                g.FillRectangle(&ib, cx + 1,       cy - hs, pbw, sz);
+                REAL pbw = DpiScaleF(2.4f);
+                g.FillRectangle(&ib, cx - pbw - DpiScaleF(1.0f), cy - hs, pbw, sz);
+                g.FillRectangle(&ib, cx + DpiScaleF(1.0f),       cy - hs, pbw, sz);
             } else if (icon == 4) { // next
                 PointF p[3] = {
                     PointF(cx - hs,            cy - hs),
                     PointF(cx - hs,            cy + hs),
-                    PointF(cx + hs - bw - 1,   cy)
+                    PointF(cx + hs - bw - DpiScaleF(1.0f),   cy)
                 };
                 g.FillPolygon(&ib, p, 3);
                 g.FillRectangle(&ib, cx + hs - bw, cy - hs, bw, sz);
@@ -952,6 +1013,8 @@ static void Repaint(HWND hwnd) {
 static LRESULT CALLBACK MediaWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_CREATE:
+            g_CurrentDpi = DpiForTaskbar(hwnd);
+            RecreateTextFormats(g_CurrentDpi);
             UpdateAppearance(hwnd);
             // POLL_MEDIA (1 s): refresh title/artist/art and re-anchor the
             // SMTC position. PROGRESS (100 ms): just repaint with the
@@ -1076,9 +1139,19 @@ static LRESULT CALLBACK MediaWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                 if (!gameMode) ShowWindow(hwnd, SW_SHOWNOACTIVATE);
             }
 
-            int x = rc.left + g_Settings.leftPadding;
+            // Taskbar may have crossed to a different-DPI monitor — pick up
+            // its current DPI before computing the widget's geometry so the
+            // rect we compare against / send to SetWindowPos is in the same
+            // pixel space as the taskbar's own coordinates.
+            UINT newDpi = DpiForTaskbar(hwnd);
+            if (newDpi != g_CurrentDpi) {
+                g_CurrentDpi = newDpi;
+                RecreateTextFormats(g_CurrentDpi);
+            }
+
+            int x = rc.left + DpiScale(g_Settings.leftPadding);
             int y = rc.top;
-            int w = g_Settings.playerWidth;
+            int w = DpiScale(g_Settings.playerWidth);
             int h = tbHeight;
 
             RECT cur; GetWindowRect(hwnd, &cur);
@@ -1088,6 +1161,21 @@ static LRESULT CALLBACK MediaWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                     SWP_NOACTIVATE | SWP_SHOWWINDOW);
                 Repaint(hwnd);
             }
+            return 0;
+        }
+
+        case WM_DPICHANGED: {
+            // Per-monitor v2: fires when the widget is moved (by us via
+            // SetWindowPos in WM_APP+10) onto a monitor with a different
+            // effective DPI. Recompute scale and rebuild DWrite formats;
+            // lParam carries a suggested rect, but ours is dictated by the
+            // taskbar, so we just re-trigger WM_APP+10 to re-anchor.
+            UINT newDpi = HIWORD(wParam);
+            if (newDpi && newDpi != g_CurrentDpi) {
+                g_CurrentDpi = newDpi;
+                RecreateTextFormats(g_CurrentDpi);
+            }
+            PostMessage(hwnd, WM_APP + 10, 0, 0);
             return 0;
         }
 
@@ -1117,6 +1205,10 @@ static LRESULT CALLBACK MediaWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
 // ------ Mod thread ------
 static void MediaThread() {
     winrt::init_apartment();
+    // Pick up the taskbar's monitor DPI before creating any GDI/D2D
+    // resources, so InitD2DDWrite() builds text formats at the right scale
+    // on first try (WM_CREATE will still refresh once the window exists).
+    g_CurrentDpi = DpiForTaskbar(nullptr);
 
     GdiplusStartupInput gpsi;
     ULONG_PTR gpToken;
@@ -1147,7 +1239,7 @@ static void MediaThread() {
             WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
             wc.lpszClassName, L"SpotifyTaskbarPlayer",
             WS_POPUP,
-            0, 0, g_Settings.playerWidth, 48,
+            0, 0, DpiScale(g_Settings.playerWidth), DpiScale(48),
             NULL, NULL, wc.hInstance, NULL,
             ZBID_IMMERSIVE_NOTIFICATION);
         if (g_hMediaWindow) Wh_Log(L"Window created in ZBID_IMMERSIVE_NOTIFICATION");
@@ -1158,7 +1250,7 @@ static void MediaThread() {
             WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
             wc.lpszClassName, L"SpotifyTaskbarPlayer",
             WS_POPUP,
-            0, 0, g_Settings.playerWidth, 48,
+            0, 0, DpiScale(g_Settings.playerWidth), DpiScale(48),
             NULL, NULL, wc.hInstance, NULL);
     }
 
@@ -1182,6 +1274,11 @@ static std::thread* g_pMediaThread = nullptr;
 
 // ------ Windhawk Tool Mod callbacks ------
 BOOL WhTool_ModInit() {
+    // Per-monitor v2 — opt in early so the tool process renders at the
+    // right physical size on high-DPI monitors and reacts to monitor moves.
+    // Idempotent if the process is already DPI-aware (no-ops then).
+    EnablePerMonitorDpiV2();
+
     LoadSettings();
     g_Running = true;
     g_pMediaThread = new std::thread(MediaThread);
